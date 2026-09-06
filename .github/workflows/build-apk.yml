@@ -1,0 +1,80 @@
+name: Build System Yummy APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Extract project
+        run: |
+          unzip -q system-yummy-android-ready.zip -d project
+
+      - name: Prepare Android project
+        working-directory: project/system-yummy-android
+        run: |
+          mkdir -p /tmp/yummy-native
+
+          cp android/app/src/main/java/com/systemyummy/app/PrinterPlugin.kt /tmp/yummy-native/
+          cp android/app/src/main/java/com/systemyummy/app/MainActivity.kt /tmp/yummy-native/
+
+          rm -rf android
+
+          npm install
+          npx cap add android
+
+          mkdir -p android/app/src/main/java/com/systemyummy/app
+
+          cp /tmp/yummy-native/PrinterPlugin.kt android/app/src/main/java/com/systemyummy/app/
+          cp /tmp/yummy-native/MainActivity.kt android/app/src/main/java/com/systemyummy/app/
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+
+          permissions = """
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+          """
+
+          s = s.replace(
+              '<application',
+              permissions + '\n    <application',
+              1
+          )
+
+          p.write_text(s)
+          PY
+
+          npx cap sync android
+
+      - name: Build APK
+        working-directory: project/system-yummy-android/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-yummy-apk
+          path: project/system-yummy-android/android/app/build/outputs/apk/debug/app-debug.apk
