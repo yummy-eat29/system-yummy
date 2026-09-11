@@ -2,12 +2,16 @@ name: Build System Yummy APK
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Download project
         uses: actions/checkout@v4
 
@@ -22,59 +26,76 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Extract project
-        run: |
-          unzip -q system-yummy-android-ready.zip -d project
-
       - name: Prepare Android project
-        working-directory: project/system-yummy-android
+        shell: bash
         run: |
-          mkdir -p /tmp/yummy-native
+          set -e
 
-          cp android/app/src/main/java/com/systemyummy/app/PrinterPlugin.kt /tmp/yummy-native/
-          cp android/app/src/main/java/com/systemyummy/app/MainActivity.kt /tmp/yummy-native/
+          mkdir -p project/www
 
-          rm -rf android
+          rsync -av \
+            --exclude='.git' \
+            --exclude='project' \
+            --exclude='.github' \
+            ./ project/www/
+
+          cat > project/package.json <<'EOF'
+          {
+            "name": "system-yummy-android",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/core": "7.4.3",
+              "@capacitor/android": "7.4.3"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "7.4.3"
+            }
+          }
+          EOF
+
+          cat > project/capacitor.config.json <<'EOF'
+          {
+            "appId": "com.systemyummy.app",
+            "appName": "System Yummy",
+            "webDir": "www",
+            "android": {
+              "scheme": "https"
+            }
+          }
+          EOF
+
+          cd project
 
           npm install
+
           npx cap add android
 
           mkdir -p android/app/src/main/java/com/systemyummy/app
 
-          cp /tmp/yummy-native/PrinterPlugin.kt android/app/src/main/java/com/systemyummy/app/
-          cp /tmp/yummy-native/MainActivity.kt android/app/src/main/java/com/systemyummy/app/
+          cat > android/app/src/main/java/com/systemyummy/app/PrinterBridge.kt <<'EOF'
+          package com.systemyummy.app
 
-          python3 - <<'PY'
-          from pathlib import Path
+          import android.Manifest
+          import android.app.Activity
+          import android.bluetooth.BluetoothAdapter
+          import android.bluetooth.BluetoothSocket
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.util.Base64
+          import android.webkit.JavascriptInterface
+          import java.util.UUID
 
-          p = Path("android/app/src/main/AndroidManifest.xml")
-          s = p.read_text()
+          class PrinterBridge(private val activity: Activity) {
 
-          permissions = """
-              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-          """
+              private var socket: BluetoothSocket? = null
 
-          s = s.replace(
-              '<application',
-              permissions + '\n    <application',
-              1
-          )
+              private val sppUuid =
+                  UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
-          p.write_text(s)
-          PY
-
-          npx cap sync android
-
-      - name: Build APK
-        working-directory: project/system-yummy-android/android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
-
-      - name: Save APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: system-yummy-apk
-          path: project/system-yummy-android/android/app/build/outputs/apk/debug/app-debug.apk
+              private fun hasBluetoothPermission(): Boolean {
+                  return Build.VERSION.SDK_INT < 31 ||
+                      activity.checkSelfPermission(
+                          Manifest.permission.BLUETOOTH_CONNECT
+                      ) == PackageManager
