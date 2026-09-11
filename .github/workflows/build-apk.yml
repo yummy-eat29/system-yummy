@@ -98,4 +98,228 @@ jobs:
                   return Build.VERSION.SDK_INT < 31 ||
                       activity.checkSelfPermission(
                           Manifest.permission.BLUETOOTH_CONNECT
-                      ) == PackageManager
+                      ) == PackageManager.PERMISSION_GRANTED
+              }
+
+              private fun requestBluetoothPermission() {
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      activity.requestPermissions(
+                          arrayOf(
+                              Manifest.permission.BLUETOOTH_SCAN,
+                              Manifest.permission.BLUETOOTH_CONNECT
+                          ),
+                          701
+                      )
+                  }
+              }
+
+              @JavascriptInterface
+              fun isSupported(): Boolean {
+                  return BluetoothAdapter.getDefaultAdapter() != null
+              }
+
+              @JavascriptInterface
+              fun isConnected(): Boolean {
+                  return try {
+                      socket?.isConnected == true
+                  } catch (_: Exception) {
+                      false
+                  }
+              }
+
+              @JavascriptInterface
+              fun getConnectedName(): String {
+                  return try {
+                      socket?.remoteDevice?.name ?: ""
+                  } catch (_: Exception) {
+                      ""
+                  }
+              }
+
+              @JavascriptInterface
+              fun openBluetoothSettings() {
+                  activity.startActivity(
+                      Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                  )
+              }
+
+              @JavascriptInterface
+              fun connect(namePrefix: String): Boolean {
+
+                  if (!hasBluetoothPermission()) {
+                      requestBluetoothPermission()
+                      return false
+                  }
+
+                  val adapter =
+                      BluetoothAdapter.getDefaultAdapter()
+                          ?: return false
+
+                  if (!adapter.isEnabled) {
+                      return false
+                  }
+
+                  disconnect()
+
+                  val wanted = namePrefix.trim().lowercase()
+
+                  val device = try {
+                      adapter.bondedDevices.firstOrNull { d ->
+                          val name =
+                              (d.name ?: "").lowercase()
+
+                          wanted.isEmpty() ||
+                          name.contains(wanted) ||
+                          name.contains("617-r58p")
+                      }
+                  } catch (_: SecurityException) {
+                      null
+                  }
+
+                  if (device == null) {
+                      return false
+                  }
+
+                  return try {
+                      adapter.cancelDiscovery()
+
+                      val newSocket =
+                          device.createRfcommSocketToServiceRecord(sppUuid)
+
+                      newSocket.connect()
+
+                      socket = newSocket
+
+                      true
+
+                  } catch (_: Exception) {
+                      disconnect()
+                      false
+                  }
+              }
+
+              @JavascriptInterface
+              fun writeBase64(data: String): Boolean {
+                  return try {
+
+                      if (!hasBluetoothPermission()) {
+                          return false
+                      }
+
+                      val bytes =
+                          Base64.decode(data, Base64.DEFAULT)
+
+                      val output =
+                          socket?.outputStream
+                              ?: return false
+
+                      output.write(bytes)
+                      output.flush()
+
+                      true
+
+                  } catch (_: Exception) {
+                      false
+                  }
+              }
+
+              @JavascriptInterface
+              fun disconnect() {
+                  try {
+                      socket?.close()
+                  } catch (_: Exception) {
+                  }
+
+                  socket = null
+              }
+          }
+          EOF
+
+          cat > android/app/src/main/java/com/systemyummy/app/MainActivity.kt <<'EOF'
+          package com.systemyummy.app
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.webkit.WebChromeClient
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+
+          class MainActivity : Activity() {
+
+              private lateinit var webView: WebView
+              private lateinit var printer: PrinterBridge
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  webView = WebView(this)
+
+                  webView.settings.javaScriptEnabled = true
+                  webView.settings.domStorageEnabled = true
+                  webView.settings.allowFileAccess = true
+                  webView.settings.allowContentAccess = true
+                  webView.settings.cacheMode =
+                      WebSettings.LOAD_DEFAULT
+
+                  webView.webViewClient = WebViewClient()
+                  webView.webChromeClient = WebChromeClient()
+
+                  printer = PrinterBridge(this)
+
+                  webView.addJavascriptInterface(
+                      printer,
+                      "AndroidPrinter"
+                  )
+
+                  setContentView(webView)
+
+                  webView.loadUrl(
+                      "file:///android_asset/public/index.html"
+                  )
+              }
+
+              override fun onDestroy() {
+                  printer.disconnect()
+                  webView.destroy()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+
+          permissions = """
+          <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+          <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+          <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+          <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+          <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+          """
+
+          if "android.permission.BLUETOOTH_CONNECT" not in s:
+              s = s.replace(
+                  "<application",
+                  permissions + "\n<application",
+                  1
+              )
+
+          p.write_text(s)
+          PY
+
+          npx cap sync android
+
+          chmod +x android/gradlew
+
+          ./android/gradlew assembleDebug
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-yummy-apk
+          path: project/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
